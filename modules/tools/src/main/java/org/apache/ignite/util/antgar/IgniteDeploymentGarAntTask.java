@@ -90,57 +90,39 @@ public class IgniteDeploymentGarAntTask extends Zip {
      * Executes the Ant task.
      */
     @Override public void execute() {
+        checkDescriptor();
+        super.execute();
+    }
+
+    public void checkDescriptor() {
         setEncoding("UTF8");
 
-        // Otherwise super method will throw exception.
-        if (baseDir != null && baseDir.isDirectory()) {
-
-            File[] files = baseDir.listFiles(new FileFilter() {
-                /** {@inheritDoc} */
-                @Override public boolean accept(File pathname) {
-                    return pathname.isDirectory() && pathname.getName().equals(DESC_PATH);
-                }
-            });
-
-            if (files.length == 1) {
-                files = files[0].listFiles(new FileFilter() {
-                    /** {@inheritDoc} */
-                    @Override public boolean accept(File pathname) {
-                        return !pathname.isDirectory() && pathname.getName().equals(DESC_NAME);
-                    }
-                });
-            }
-
-            File desc = null;
-
-            if (files.length == 1)
-                desc = files[0];
-
-            // File was defined in source.
-            if (desc != null) {
-                if (descDir != null) {
-                    throw new BuildException("Ignite descriptor '" + DESC_NAME + "' is already " +
-                        "defined in source folder.");
-                }
-            }
-            // File wasn't defined in source and could be defined using 'descrdir' attribute.
-            // Try to find the descriptor in defined directory.
-            else if (descDir != null) {
-                if (!descDir.isDirectory()) {
-                    throw new BuildException(
-                        "'descrdir' attribute isn't folder [dir=" + descDir.getAbsolutePath() + ']');
-                }
-
-                descFile = new File(getFullPath(descDir.getAbsolutePath(), DESC_NAME));
-
-                if (!descFile.exists()) {
-                    throw new BuildException("Folder doesn't contain Ignite descriptor [path=" +
-                            descDir.getAbsolutePath() + ']');
-                }
-            }
+        if (descDir == null) {
+            return;
         }
 
-        super.execute();
+        if (baseDir == null ||
+                !baseDir.isDirectory() ||
+                !baseDir.getName().equals(DESC_PATH)) {
+            return;
+        }
+
+        File baseFile = new File(getFullPath(baseDir.getAbsolutePath(), DESC_NAME));
+
+        if (baseFile.exists() && !baseFile.isDirectory()) {
+            throw new BuildException("Ignite descriptor '" + DESC_NAME + "' is already defined in source folder.");
+        }
+        else {
+            if (!descDir.isDirectory()) {
+                throw new BuildException("'descrdir' attribute isn't folder [dir=" + descDir.getAbsolutePath() + ']');
+            }
+
+            descFile = new File(getFullPath(descDir.getAbsolutePath(), DESC_NAME));
+
+            if (!descFile.exists()) {
+                throw new BuildException("Folder doesn't contain Ignite descriptor [path=" + descDir.getAbsolutePath() + ']');
+            }
+        }
     }
 
     /** {@inheritDoc} */

@@ -125,9 +125,6 @@ public class GridJavadocAntTask extends MatchingTask {
             try {
                 processFile(file);
             }
-            catch (IOException e) {
-                throw new BuildException("IO error while processing: " + file, e);
-            }
             catch (IllegalArgumentException e) {
                 System.err.println("JavaDoc error: " + e.getMessage());
 
@@ -160,43 +157,24 @@ public class GridJavadocAntTask extends MatchingTask {
      * @throws IOException Thrown in case of any I/O error.
      * @throws IllegalArgumentException In JavaDoc HTML validation failed.
      */
-    private void processFile(String file) throws IOException {
-        assert file != null;
+    private void processFile(String file) {
+        Collection<GridJavadocToken> tokens = getHtmlTokens(file);
+        setHtmlMeta(tokens);
+        String fileContent = fixSpans(tokens);
+        fileContent = fixExternalLinks(fileContent);
+        fileContent = fixDeprecated(fileContent);
+        fileContent = fixNullable(fileContent);
+        fileContent = fixTodo(fileContent);
 
-        String fileContent = readFileToString(file, Charset.forName("UTF-8"));
+        replaceFile(file, fileContent);
+    }
 
-        if (verify) {
-            // Parse HTML.
-            Jerry doc = Jerry.jerry(fileContent);
-
-            if (file.endsWith("overview-summary.html")) {
-                // Try to find Other Packages section.
-                Jerry otherPackages =
-                    doc.find("div.contentContainer table.overviewSummary caption span:contains('Other Packages')");
-
-                if (otherPackages.size() > 0) {
-                    System.err.println("[ERROR]: 'Other Packages' section should not be present, but found: " +
-                        doc.html());
-                    throw new IllegalArgumentException("'Other Packages' section should not be present, " +
-                        "all packages should have corresponding documentation groups: " + file + ";" +
-                        "Please add packages description to parent/pom.xml into <plugin>(maven-javadoc-plugin) / <configuration> / <groups>");
-                }
-            }
-            else if (!isViewHtml(file)) {
-                // Try to find a class description block.
-                Jerry descBlock = doc.find("div.contentContainer div.description ul.blockList li.blockList div.block");
-
-                if (descBlock.size() == 0)
-                    throw new IllegalArgumentException("Class doesn't have description in file: " + file);
-            }
-        }
+    private Collection<GridJavadocToken> getHtmlTokens(String fileName) {
+        String fileContent = getVerifyHtml(fileName);
 
         GridJavadocCharArrayLexReader lexer = new GridJavadocCharArrayLexReader(fileContent.toCharArray());
-
         Collection<GridJavadocToken> toks = new ArrayList<>();
-
         StringBuilder tokBuf = new StringBuilder();
-
         int ch;
 
         while ((ch = lexer.read()) != GridJavadocCharArrayLexReader.EOF) {
@@ -204,58 +182,35 @@ public class GridJavadocAntTask extends MatchingTask {
             if (ch =='<') {
                 if (tokBuf.length() > 0) {
                     toks.add(new GridJavadocToken(GridJavadocTokenType.TOKEN_TEXT, tokBuf.toString()));
-
                     tokBuf.setLength(0);
                 }
-
                 tokBuf.append('<');
 
                 ch = lexer.read();
-
+                for (; ch != GridJavadocCharArrayLexReader.EOF && ch != '>'; ch = lexer.read())
+                    tokBuf.append((char)ch);
                 if (ch == GridJavadocCharArrayLexReader.EOF)
-                    throw new IOException("Unexpected EOF: " + file);
+                    throw new BuildException("Unexpected EOF: " + fileName);
 
-                // Instruction or comment.
-                if (ch == '!') {
-                    for (; ch != GridJavadocCharArrayLexReader.EOF && ch != '>'; ch = lexer.read())
-                        tokBuf.append((char)ch);
+                tokBuf.append('>');
+                if (tokBuf.length() == 2)
+                    throw new BuildException("Invalid HTML in [file=" + fileName + ", html=" + tokBuf + ']');
 
-                    if (ch == GridJavadocCharArrayLexReader.EOF)
-                        throw new IOException("Unexpected EOF: " + file);
-
-                    assert ch == '>';
-
-                    tokBuf.append('>');
-
-                    String val = tokBuf.toString();
-
-                    toks.add(new GridJavadocToken(val.startsWith("<!--") ? GridJavadocTokenType.TOKEN_COMM :
-                        GridJavadocTokenType.TOKEN_INSTR, val));
-
-                    tokBuf.setLength(0);
+                String val = tokBuf.toString();
+                if (val.startsWith("<!--")) {
+                    toks.add(new GridJavadocToken(GridJavadocTokenType.TOKEN_COMM, val));
                 }
-                // Tag.
+                else if (val.startsWith("<!")) {
+                    toks.add(new GridJavadocToken(GridJavadocTokenType.TOKEN_INSTR, val));
+                }
+                else if (val.startsWith("</")) {
+                    toks.add(new GridJavadocToken(GridJavadocTokenType.TOKEN_CLOSE_TAG, val));
+                }
                 else {
-                    for (; ch != GridJavadocCharArrayLexReader.EOF && ch != '>'; ch = lexer.read())
-                        tokBuf.append((char)ch);
-
-                    if (ch == GridJavadocCharArrayLexReader.EOF)
-                        throw new IOException("Unexpected EOF: " + file);
-
-                    assert ch == '>';
-
-                    tokBuf.append('>');
-
-                    if (tokBuf.length() <= 2)
-                        throw new IOException("Invalid HTML in [file=" + file + ", html=" + tokBuf + ']');
-
-                    String val = tokBuf.toString();
-
-                    toks.add(new GridJavadocToken(val.startsWith("</") ?
-                        GridJavadocTokenType.TOKEN_CLOSE_TAG : GridJavadocTokenType.TOKEN_OPEN_TAG, val));
-
-                    tokBuf.setLength(0);
+                    toks.add(new GridJavadocToken(GridJavadocTokenType.TOKEN_OPEN_TAG, val));
                 }
+
+                tokBuf.setLength(0);
             }
             else
                 tokBuf.append((char)ch);
@@ -264,6 +219,47 @@ public class GridJavadocAntTask extends MatchingTask {
         if (tokBuf.length() > 0)
             toks.add(new GridJavadocToken(GridJavadocTokenType.TOKEN_TEXT, tokBuf.toString()));
 
+        return toks;
+    }
+
+    private String getVerifyHtml(String fileName){
+        String fileContent;
+        try {
+            fileContent = readFileToString(fileName, Charset.forName("UTF-8"));
+        } catch (IOException e) {
+            throw new BuildException("IO error while processing: " + fileName, e);
+        }
+
+        if (!verify) {
+            return fileContent;
+        }
+
+        // Parse HTML.
+        Jerry doc = Jerry.jerry(fileContent);
+
+        if (fileName.endsWith("overview-summary.html")) {
+            // Try to find Other Packages section.
+            Jerry otherPackages = doc.find("div.contentContainer table.overviewSummary caption span:contains('Other Packages')");
+
+            if (otherPackages.size() > 0) {
+                System.err.println("[ERROR]: 'Other Packages' section should not be present, but found: " + doc.html());
+                throw new IllegalArgumentException("'Other Packages' section should not be present, " +
+                        "all packages should have corresponding documentation groups: " + fileName + ";" +
+                        "Please add packages description to parent/pom.xml into <plugin>(maven-javadoc-plugin) / <configuration> / <groups>");
+            }
+        }
+        else if (!isViewHtml(fileName)) {
+            // Try to find a class description block.
+            Jerry descBlock = doc.find("div.contentContainer div.description ul.blockList li.blockList div.block");
+
+            if (descBlock.size() == 0) {
+                throw new IllegalArgumentException("Class doesn't have description in file: " + fileName);
+            }
+        }
+        return fileContent;
+    }
+
+    private void setHtmlMeta(Collection<GridJavadocToken> toks) {
         for (GridJavadocToken tok : toks) {
             String val = tok.value();
 
@@ -271,61 +267,55 @@ public class GridJavadocAntTask extends MatchingTask {
                 case TOKEN_COMM: {
                     break;
                 }
-
                 case TOKEN_OPEN_TAG: {
                     tok.update(fixColors(tok.value()));
 
                     break;
                 }
-
                 case TOKEN_CLOSE_TAG: {
                     if ("</head>".equalsIgnoreCase(val))
                         tok.update(
-                            "<link rel='shortcut icon' href='https://ignite.apache.org/favicon.ico'/>\n" +
-                            "<link type='text/css' rel='stylesheet' href='" + SH_URL + "/styles/shCore.css'/>\n" +
-                            "<link type='text/css' rel='stylesheet' href='" + SH_URL +
-                                "/styles/shThemeDefault.css'/>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shCore.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shLegacy.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushJava.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushPlain.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL +
-                                "/scripts/shBrushJScript.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushBash.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushXml.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushScala.js'></script>\n" +
-                            "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushGroovy.js'></script>\n" +
-                            "</head>\n");
+                                "<link rel='shortcut icon' href='https://ignite.apache.org/favicon.ico'/>\n" +
+                                        "<link type='text/css' rel='stylesheet' href='" + SH_URL + "/styles/shCore.css'/>\n" +
+                                        "<link type='text/css' rel='stylesheet' href='" + SH_URL +
+                                        "/styles/shThemeDefault.css'/>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shCore.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shLegacy.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushJava.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushPlain.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL +
+                                        "/scripts/shBrushJScript.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushBash.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushXml.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushScala.js'></script>\n" +
+                                        "<script type='text/javascript' src='" + SH_URL + "/scripts/shBrushGroovy.js'></script>\n" +
+                                        "</head>\n");
                     else if ("</body>".equalsIgnoreCase(val))
                         tok.update(
-                            "<!--FOOTER-->" +
-                            "<script type='text/javascript'>" +
-                                "SyntaxHighlighter.all();" +
-                                "dp.SyntaxHighlighter.HighlightAll('code');" +
-                                "!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');" +
-                            "</script>\n" +
-                            "</body>\n");
-
+                                "<!--FOOTER-->" +
+                                        "<script type='text/javascript'>" +
+                                        "SyntaxHighlighter.all();" +
+                                        "dp.SyntaxHighlighter.HighlightAll('code');" +
+                                        "!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');" +
+                                        "</script>\n" +
+                                        "</body>\n");
                     break;
                 }
-
                 case TOKEN_INSTR: {
                     // No-op.
-
                     break;
                 }
-
                 case TOKEN_TEXT: {
                     tok.update(fixColors(val));
-
                     break;
                 }
-
                 default:
                     assert false;
             }
         }
+    }
 
+    private String fixSpans(Collection<GridJavadocToken> toks) {
         StringBuilder buf = new StringBuilder();
         StringBuilder tmp = new StringBuilder();
 
@@ -340,51 +330,32 @@ public class GridJavadocAntTask extends MatchingTask {
                 case TOKEN_TEXT:
                 case TOKEN_COMM: {
                     tmp.append(val);
-
                     break;
                 }
-
                 case TOKEN_OPEN_TAG: {
                     if (val.toLowerCase().startsWith("<pre name=")) {
                         inPre = true;
-
                         buf.append(fixBrackets(tmp.toString()));
-
                         tmp.setLength(0);
                     }
-
                     tmp.append(val);
-
                     break;
                 }
-
                 case TOKEN_CLOSE_TAG: {
                     if (val.toLowerCase().startsWith("</pre") && inPre) {
                         inPre = false;
-
                         buf.append(tmp.toString());
-
                         tmp.setLength(0);
                     }
-
                     tmp.append(val);
-
                     break;
                 }
-
                 default:
                     assert false;
             }
         }
 
-        String s = buf.append(fixBrackets(tmp.toString())).toString();
-
-        s = fixExternalLinks(s);
-        s = fixDeprecated(s);
-        s = fixNullable(s);
-        s = fixTodo(s);
-
-        replaceFile(file, s);
+        return buf.append(fixBrackets(tmp.toString())).toString();
     }
 
     /**
@@ -468,9 +439,11 @@ public class GridJavadocAntTask extends MatchingTask {
      * @param body New body for the file.
      * @throws IOException Thrown in case of any errors.
      */
-    private void replaceFile(String file, String body) throws IOException {
+    private void replaceFile(String file, String body) {
         try (OutputStream out = new BufferedOutputStream(new FileOutputStream(file))) {
             out.write(body.getBytes());
+        } catch (IOException e) {
+            throw new BuildException("IO error while processing: " + file, e);
         }
     }
 
