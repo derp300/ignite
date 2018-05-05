@@ -301,6 +301,10 @@ import org.jetbrains.annotations.Nullable;
 @IgniteSpiConsistencyChecked(optional = false)
 @SuppressWarnings({"FieldAccessedSynchronizedAndUnsynchronized"})
 public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi {
+    /**
+     -     * Default temporary directory name relative to file path
+     -     * {@link #setTemporaryDirectoryPath(String)}} (value is {@code gg.uri.deployment.tmp}).
+     -     */
     private static final String DEPLOY_TMP_ROOT_NAME = "gg.uri.deployment.tmp";
     /** Default task description file path and name (value is {@code META-INF/ignite.xml}). */
     static final String XML_DESCRIPTOR_PATH = "META-INF/ignite.xml";
@@ -331,10 +335,14 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
 
     private UriDeploymentSpiController uriDeploymentSpiController = new UriDeploymentSpiController(this);
 
+    /** Temporary directory name. */
     private String tmpDirPath;
 
+    /** NOTE: flag for test purposes only. */
+    @SuppressWarnings("UnusedDeclaration")
     private boolean delayOnNewOrUpdatedFile;
 
+    /** Sub-folder of 'tmpDirPath'. */
     private String deployTmpDirPath;
 
     /**
