@@ -18,14 +18,11 @@
 package org.apache.ignite.spi.deployment.uri;
 
 import java.io.File;
-import java.io.FilenameFilter;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -36,7 +33,7 @@ import java.util.ListIterator;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import org.apache.ignite.IgniteCheckedException;
+
 import org.apache.ignite.IgniteLogger;
 import org.apache.ignite.compute.ComputeTask;
 import org.apache.ignite.compute.ComputeTaskName;
@@ -52,7 +49,6 @@ import org.apache.ignite.spi.IgniteSpiAdapter;
 import org.apache.ignite.spi.IgniteSpiConfiguration;
 import org.apache.ignite.spi.IgniteSpiConsistencyChecked;
 import org.apache.ignite.spi.IgniteSpiException;
-import org.apache.ignite.spi.IgniteSpiMBeanAdapter;
 import org.apache.ignite.spi.IgniteSpiMultipleInstancesSupport;
 import org.apache.ignite.spi.deployment.DeploymentListener;
 import org.apache.ignite.spi.deployment.DeploymentResource;
@@ -175,10 +171,6 @@ import org.jetbrains.annotations.Nullable;
  * <li>
  * Temporary directory path where scanned GAR files and directories are
  * copied to (see {@link #setTemporaryDirectoryPath(String) setTemporaryDirectoryPath(String)}).
- * </li>
- * <li>
- * List of URIs to scan (see {@link #setUriList(List)}). If not
- * specified, then URI specified by {@link #DFLT_DEPLOY_DIR DFLT_DEPLOY_DIR} is used.
  * </li>
  * <li>
  * Flag to control encoding of the {@code 'path'} portion of URI
@@ -309,35 +301,9 @@ import org.jetbrains.annotations.Nullable;
 @IgniteSpiConsistencyChecked(optional = false)
 @SuppressWarnings({"FieldAccessedSynchronizedAndUnsynchronized"})
 public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi {
-    /**
-     * Default deployment directory where SPI will pick up GAR files. Note that this path is relative to
-     * {@code IGNITE_HOME/work} folder if {@code IGNITE_HOME} system or environment variable specified,
-     * otherwise it is relative to {@code work} folder under system {@code java.io.tmpdir} folder.
-     *
-     * @see org.apache.ignite.configuration.IgniteConfiguration#getWorkDirectory()
-     */
-    public static final String DFLT_DEPLOY_DIR = "deployment/file";
-
+    private static final String DEPLOY_TMP_ROOT_NAME = "gg.uri.deployment.tmp";
     /** Default task description file path and name (value is {@code META-INF/ignite.xml}). */
-    public static final String XML_DESCRIPTOR_PATH = "META-INF/ignite.xml";
-
-    /**
-     * Default temporary directory name relative to file path
-     * {@link #setTemporaryDirectoryPath(String)}} (value is {@code gg.uri.deployment.tmp}).
-     */
-    public static final String DEPLOY_TMP_ROOT_NAME = "gg.uri.deployment.tmp";
-
-    /** Temporary directory name. */
-    private String tmpDirPath;
-
-    /** Sub-folder of 'tmpDirPath'. */
-    private String deployTmpDirPath;
-
-    /** List of URIs to be scanned. */
-    private List<String> uriList = new ArrayList<>();
-
-    /** List of encoded URIs. */
-    private Collection<URI> uriEncodedList = new ArrayList<>();
+    static final String XML_DESCRIPTOR_PATH = "META-INF/ignite.xml";
 
     /** Indicates whether md5 digest should be checked by this SPI before file deployment. */
     private boolean checkMd5;
@@ -350,14 +316,8 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
     @SuppressWarnings({"TypeMayBeWeakened"})
     private final LastTimeUnitDescriptorComparator unitComp = new LastTimeUnitDescriptorComparator();
 
-    /** List of scanner managers. Every URI has it's own manager. */
-    private final Collection<UriDeploymentScannerManager> mgrs = new ArrayList<>();
-
-    /** Whether URIs should be encoded or not. */
-    private boolean encodeUri = true;
-
     /** Whether first scan cycle is completed or not. */
-    private int firstScanCntr;
+    protected int firstScanCntr;
 
     /** Deployment listener which processes all notifications from scanners. */
     private volatile DeploymentListener lsnr;
@@ -367,14 +327,15 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
 
     /** */
     @LoggerResource
-    private IgniteLogger log;
+    protected IgniteLogger log;
 
-    /** NOTE: flag for test purposes only. */
-    @SuppressWarnings("UnusedDeclaration")
+    private UriDeploymentSpiController uriDeploymentSpiController = new UriDeploymentSpiController(this);
+
+    private String tmpDirPath;
+
     private boolean delayOnNewOrUpdatedFile;
 
-    /** Configured scanners. */
-    private UriDeploymentScanner[] scanners;
+    private String deployTmpDirPath;
 
     /**
      * Sets absolute path to temporary directory which will be used by
@@ -406,8 +367,7 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
      */
     @IgniteSpiConfiguration(optional = true)
     public UriDeploymentSpi setUriList(List<String> uriList) {
-        this.uriList = uriList;
-
+        uriDeploymentSpiController.setUriList(uriList);
         return this;
     }
 
@@ -447,8 +407,7 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
      */
     @IgniteSpiConfiguration(optional = true)
     public UriDeploymentSpi setEncodeUri(boolean encodeUri) {
-        this.encodeUri = encodeUri;
-
+        uriDeploymentSpiController.setEncodeUri(encodeUri);
         return this;
     }
 
@@ -467,7 +426,7 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
      * @return List of URIs.
      */
     public List<String> getUriList() {
-        return Collections.unmodifiableList(uriList);
+        return uriDeploymentSpiController.getUriList();
     }
 
     /** {@inheritDoc} */
@@ -481,7 +440,7 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
      * @return Scanners.
      */
     public UriDeploymentScanner[] getScanners() {
-        return scanners;
+        return uriDeploymentSpiController.getScanners();
     }
 
     /**
@@ -492,213 +451,19 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
      */
     @IgniteSpiConfiguration(optional = true)
     public UriDeploymentSpi setScanners(UriDeploymentScanner... scanners) {
-        this.scanners = scanners;
-
+        uriDeploymentSpiController.setScanners(scanners);
         return this;
     }
 
     /** {@inheritDoc} */
     @Override public void spiStop() throws IgniteSpiException {
-        for (UriDeploymentScannerManager mgr : mgrs)
-            mgr.cancel();
-
-        for (UriDeploymentScannerManager mgr : mgrs)
-            mgr.join();
-
-        // Clear inner collections.
-        uriEncodedList.clear();
-        mgrs.clear();
-
-        List<ClassLoader> tmpClsLdrs;
-
-        // Release all class loaders.
-        synchronized (mux) {
-            tmpClsLdrs = new ArrayList<>(unitLoaders.size());
-
-            for (GridUriDeploymentUnitDescriptor desc : unitLoaders)
-                tmpClsLdrs.add(desc.getClassLoader());
-        }
-
-        for (ClassLoader ldr : tmpClsLdrs)
-            onUnitReleased(ldr);
-
-        // Delete temp directory.
-        if (deployTmpDirPath != null)
-            U.delete(new File(deployTmpDirPath));
-
-        unregisterMBean();
-
-        // Ack ok stop.
-        if (log.isDebugEnabled())
-            log.debug(stopInfo());
+        uriDeploymentSpiController.spiStop();
     }
 
     /** {@inheritDoc} */
     @Override public void spiStart(String igniteInstanceName) throws IgniteSpiException {
-        // Start SPI start stopwatch.
         startStopwatch();
-
-        assertParameter(uriList != null, "uriList != null");
-
-        initializeUriList();
-
-        if (uriEncodedList.isEmpty())
-            addDefaultUri();
-
-        initializeTemporaryDirectoryPath();
-
-        registerMBean(igniteInstanceName, new UriDeploymentSpiMBeanImpl(this), UriDeploymentSpiMBean.class);
-
-        FilenameFilter filter = new FilenameFilter() {
-            @Override public boolean accept(File dir, String name) {
-                assert name != null;
-
-                return name.toLowerCase().endsWith(".gar");
-            }
-        };
-
-        firstScanCntr = 0;
-
-        GridUriDeploymentScannerListener lsnr = new GridUriDeploymentScannerListener() {
-            @Override public void onNewOrUpdatedFile(File file, String uri, long tstamp) {
-                if (log.isInfoEnabled())
-                    log.info("Found new or updated GAR units [uri=" + U.hidePassword(uri) +
-                        ", file=" + file.getAbsolutePath() + ", tstamp=" + tstamp + ']');
-
-                if (delayOnNewOrUpdatedFile) {
-                    U.warn(log, "Delaying onNewOrUpdatedFile() by 10000 ms since 'delayOnNewOrUpdatedFile' " +
-                        "is set to true (is this intentional?).");
-
-                    try {
-                        U.sleep(10000);
-                    }
-                    catch (IgniteInterruptedCheckedException ignored) {
-                        // No-op
-                    }
-
-                    U.warn(log, "Delay finished.");
-                }
-
-                try {
-                    GridUriDeploymentFileProcessorResult fileRes = GridUriDeploymentFileProcessor.processFile(file, uri,
-                        new File(deployTmpDirPath), log);
-
-                    if (fileRes != null)
-                        newUnitReceived(uri, fileRes.getFile(), tstamp, fileRes.getClassLoader(),
-                            fileRes.getTaskClasses(), fileRes.getMd5());
-                }
-                catch (IgniteSpiException e) {
-                    U.error(log, "Error when processing file: " + file.getAbsolutePath(), e);
-                }
-            }
-
-            /** {@inheritDoc} */
-            @Override public void onDeletedFiles(List<String> uris) {
-                if (log.isInfoEnabled()) {
-                    List<String> uriList = null;
-
-                    if (uris != null) {
-                        uriList = new ArrayList<>();
-
-                        for (String uri : uris)
-                            uriList.add(U.hidePassword(uri));
-                    }
-
-                    if (log.isInfoEnabled())
-                        log.info("Found deleted GAR units [uris=" + uriList + ']');
-                }
-
-                processDeletedFiles(uris);
-            }
-
-            /** {@inheritDoc} */
-            @Override public void onFirstScanFinished() {
-                synchronized (mux) {
-                    firstScanCntr++;
-
-                    if (isFirstScanFinished(firstScanCntr))
-                        mux.notifyAll();
-                }
-            }
-        };
-
-        // Set default scanners if none are configured.
-        if (scanners == null) {
-            scanners = new UriDeploymentScanner[2];
-
-            scanners[0] = new UriDeploymentFileScanner();
-            scanners[1] = new UriDeploymentHttpScanner();
-        }
-
-        for (URI uri : uriEncodedList) {
-            File file = new File(deployTmpDirPath);
-
-            long freq = -1;
-
-            try {
-                freq = getFrequencyFromUri(uri);
-            }
-            catch (NumberFormatException e) {
-                U.error(log, "Error parsing parameter value for frequency.", e);
-            }
-
-            UriDeploymentScannerManager mgr = null;
-
-            for (UriDeploymentScanner scanner : scanners) {
-                if (scanner.acceptsURI(uri)) {
-                    mgr = new UriDeploymentScannerManager(igniteInstanceName, uri, file, freq > 0 ? freq :
-                        scanner.getDefaultScanFrequency(), filter, lsnr, log, scanner);
-
-                    break;
-                }
-            }
-
-            if (mgr == null)
-                throw new IgniteSpiException("Unsupported URI (please configure appropriate scanner): " + uri);
-
-            mgrs.add(mgr);
-
-            mgr.start();
-        }
-
-        // Ack parameters.
-        if (log.isDebugEnabled()) {
-            log.debug(configInfo("tmpDirPath", tmpDirPath));
-            log.debug(configInfo("uriList", uriList));
-            log.debug(configInfo("encodeUri", encodeUri));
-            log.debug(configInfo("scanners", mgrs));
-        }
-
-        // Ack ok start.
-        if (log.isDebugEnabled())
-            log.debug(startInfo());
-    }
-
-    /**
-     * Gets URI refresh frequency.
-     * URI is parsed and {@code freq} parameter value returned.
-     *
-     * @param uri URI to be parsed.
-     * @return {@code -1} if there if no {@code freq} parameter otherwise
-     *      returns frequency.
-     * @throws NumberFormatException Thrown if {@code freq} parameter value
-     *      is not a number.
-     */
-    private long getFrequencyFromUri(URI uri) throws NumberFormatException {
-        assert uri != null;
-
-        String userInfo = uri.getUserInfo();
-
-        if (userInfo != null) {
-            String[] arr = userInfo.split(";");
-
-            if (arr.length > 0)
-                for (String el : arr)
-                    if (el.startsWith("freq="))
-                        return Long.parseLong(el.substring(5));
-        }
-
-        return -1;
+        uriDeploymentSpiController.spiStart(igniteInstanceName);
     }
 
     /** {@inheritDoc} */
@@ -708,7 +473,7 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
         // Wait until all scanner managers finish their first scanning.
         try {
             synchronized (mux) {
-                while (!isFirstScanFinished(firstScanCntr))
+                while (!uriDeploymentSpiController.isFirstScanFinished(firstScanCntr))
                     mux.wait(5000);
             }
         }
@@ -998,113 +763,6 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
     }
 
     /**
-     * Tests whether first scan is finished or not.
-     *
-     * @param cntr Number of already scanned URIs.
-     * @return {@code true} if all URIs have been scanned at least once and
-     *      {@code false} otherwise.
-     */
-    private boolean isFirstScanFinished(int cntr) {
-        assert uriEncodedList != null;
-
-        return cntr >= uriEncodedList.size();
-    }
-
-    /**
-     * Fills in list of URIs with all available URIs and encodes them if
-     * encoding is enabled.
-     *
-     * @throws org.apache.ignite.spi.IgniteSpiException Thrown if at least one URI has incorrect syntax.
-     */
-    private void initializeUriList() throws IgniteSpiException {
-        for (String uri : uriList) {
-            assertParameter(uri != null, "uriList.get(X) != null");
-
-            String encUri = encodeUri(uri.replaceAll("\\\\", "/"));
-
-            URI uriObj;
-
-            try {
-                uriObj = new URI(encUri);
-            }
-            catch (URISyntaxException e) {
-                throw new IgniteSpiException("Failed to parse URI [uri=" + U.hidePassword(uri) +
-                    ", encodedUri=" + U.hidePassword(encUri) + ']', e);
-            }
-
-            if (uriObj.getScheme() == null || uriObj.getScheme().trim().isEmpty())
-                throw new IgniteSpiException("Failed to get 'scheme' from URI [uri=" +
-                    U.hidePassword(uri) +
-                    ", encodedUri=" + U.hidePassword(encUri) + ']');
-
-            uriEncodedList.add(uriObj);
-        }
-    }
-
-    /**
-     * Add configuration for file scanner.
-     *
-     * @throws org.apache.ignite.spi.IgniteSpiException Thrown if default URI syntax is incorrect.
-     */
-    private void addDefaultUri() throws IgniteSpiException {
-        assert uriEncodedList != null;
-
-        URI uri;
-
-        try {
-            uri = U.resolveWorkDirectory(ignite.configuration().getWorkDirectory(), DFLT_DEPLOY_DIR, false).toURI();
-        }
-        catch (IgniteCheckedException e) {
-            throw new IgniteSpiException("Failed to initialize default file scanner", e);
-        }
-
-        uriEncodedList.add(uri);
-    }
-
-    /**
-     * Encode URI path if encoding is enabled. Set of encoded characters
-     * in path is (' ', ';', '%').
-     *
-     * @param path URI which should be encoded.
-     * @return Either encoded URI if encoding is enabled or given one
-     *      if encoding is disabled.
-     */
-    private String encodeUri(String path) {
-        return encodeUri ? new GridUriDeploymentUriParser(path).parse() : path;
-    }
-
-    /**
-     * Initializes temporary directory path. Path consists of base path
-     * (either {@link #tmpDirPath} value or {@code java.io.tmpdir}
-     * system property value if first is {@code null}) and path relative
-     * to base one - {@link #DEPLOY_TMP_ROOT_NAME}/{@code local node ID}.
-     *
-     * @throws org.apache.ignite.spi.IgniteSpiException Thrown if temporary directory could not be created.
-     */
-    private void initializeTemporaryDirectoryPath() throws IgniteSpiException {
-        String tmpDirPath = this.tmpDirPath == null ? System.getProperty("java.io.tmpdir") : this.tmpDirPath;
-
-        if (tmpDirPath == null)
-            throw new IgniteSpiException("Error initializing temporary deployment directory.");
-
-        File dir = new File(tmpDirPath + File.separator + DEPLOY_TMP_ROOT_NAME + File.separator +
-            ignite.configuration().getNodeId());
-
-        if (!U.mkdirs(dir))
-            throw new IgniteSpiException("Error initializing temporary deployment directory: " + dir);
-
-        if (!dir.isDirectory())
-            throw new IgniteSpiException("Temporary deployment directory path is not a valid directory: " + dir);
-
-        if (!dir.canRead() || !dir.canWrite())
-            throw new IgniteSpiException("Can not write to or read from temporary deployment directory: " + dir);
-
-        this.tmpDirPath = tmpDirPath;
-
-        deployTmpDirPath = dir.getPath();
-    }
-
-    /**
      * Deploys all tasks that correspond to given descriptor.
      * First method checks tasks versions and stops processing tasks that
      * have both versioned and unversioned instances.
@@ -1269,8 +927,8 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
      * @param clss List of tasks which were found in GAR file.
      * @param md5 md5 of the new unit.
      */
-    private void newUnitReceived(String uri, File file, long tstamp, ClassLoader ldr,
-        Collection<Class<? extends ComputeTask<?, ?>>> clss, @Nullable String md5) {
+    protected void newUnitReceived(String uri, File file, long tstamp, ClassLoader ldr,
+                                   Collection<Class<? extends ComputeTask<?, ?>>> clss, @Nullable String md5) {
         assert uri != null;
         assert file != null;
         assert tstamp > 0;
@@ -1282,35 +940,6 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
         GridUriDeploymentUnitDescriptor desc = new GridUriDeploymentUnitDescriptor(uri, file, tstamp, ldr, md5);
 
         newUnitReceived(desc, clss != null && !clss.isEmpty() ? new ArrayList<Class<?>>(clss) : null);
-    }
-
-    /**
-     * Removes all tasks that belong to GAR files which are on list
-     * of removed files.
-     *
-     * @param uris List of removed files.
-     */
-    @SuppressWarnings({"TypeMayBeWeakened"})
-    private void processDeletedFiles(List<String> uris) {
-        assert uris != null;
-
-        if (uris.isEmpty())
-            return;
-
-        synchronized (mux) {
-            Set<String> uriSet = new HashSet<>(uris);
-
-            for (Iterator<GridUriDeploymentUnitDescriptor> iter = unitLoaders.iterator(); iter.hasNext();) {
-                GridUriDeploymentUnitDescriptor desc = iter.next();
-
-                if (desc.getType() == GridUriDeploymentUnitDescriptor.Type.FILE && uriSet.contains(desc.getUri())) {
-                    // Remove descriptor.
-                    iter.remove();
-
-                    onUnitReleased(desc.getClassLoader());
-                }
-            }
-        }
     }
 
     /**
@@ -1347,6 +976,153 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
         return false;
     }
 
+    protected GridUriDeploymentScannerListener getNewGridUriDeploymentScannerListener() {
+        return new GridUriDeploymentScannerListener() {
+            @Override public void onNewOrUpdatedFile(File file, String uri, long tstamp) {
+                if (log.isInfoEnabled())
+                    log.info("Found new or updated GAR units [uri=" + U.hidePassword(uri) +
+                            ", file=" + file.getAbsolutePath() + ", tstamp=" + tstamp + ']');
+
+                if (delayOnNewOrUpdatedFile) {
+                    U.warn(log, "Delaying onNewOrUpdatedFile() by 10000 ms since 'delayOnNewOrUpdatedFile' " +
+                            "is set to true (is this intentional?).");
+
+                    try {
+                        U.sleep(10000);
+                    }
+                    catch (IgniteInterruptedCheckedException ignored) {
+                        // No-op
+                    }
+
+                    U.warn(log, "Delay finished.");
+                }
+
+                try {
+                    GridUriDeploymentFileProcessorResult fileRes = GridUriDeploymentFileProcessor.processFile(file, uri,
+                            new File(deployTmpDirPath), log);
+
+                    if (fileRes != null)
+                        newUnitReceived(uri, fileRes.getFile(), tstamp, fileRes.getClassLoader(),
+                                fileRes.getTaskClasses(), fileRes.getMd5());
+                }
+                catch (IgniteSpiException e) {
+                    U.error(log, "Error when processing file: " + file.getAbsolutePath(), e);
+                }
+            }
+
+            @Override public void onDeletedFiles(List<String> uris) {
+                if (log.isInfoEnabled()) {
+                    List<String> uriList = null;
+
+                    if (uris != null) {
+                        uriList = new ArrayList<>();
+
+                        for (String uri : uris)
+                            uriList.add(U.hidePassword(uri));
+                    }
+
+                    if (log.isInfoEnabled())
+                        log.info("Found deleted GAR units [uris=" + uriList + ']');
+                }
+
+                processDeletedFiles(uris);
+            }
+
+            @Override public void onFirstScanFinished() {
+                synchronized (mux) {
+                    firstScanCntr++;
+
+                    if (uriDeploymentSpiController.isFirstScanFinished(firstScanCntr))
+                        mux.notifyAll();
+                }
+            }
+        };
+    }
+
+    @SuppressWarnings({"TypeMayBeWeakened"})
+    private void processDeletedFiles(List<String> uris) {
+        assert uris != null;
+
+        if (uris.isEmpty())
+            return;
+
+        synchronized (mux) {
+            Set<String> uriSet = new HashSet<>(uris);
+
+            for (Iterator<GridUriDeploymentUnitDescriptor> iter = unitLoaders.iterator(); iter.hasNext();) {
+                GridUriDeploymentUnitDescriptor desc = iter.next();
+
+                if (desc.getType() == GridUriDeploymentUnitDescriptor.Type.FILE && uriSet.contains(desc.getUri())) {
+                    // Remove descriptor.
+                    iter.remove();
+
+                    onUnitReleased(desc.getClassLoader());
+                }
+            }
+        }
+    }
+
+    protected String initializeTemporaryDirectoryPath() throws IgniteSpiException {
+        String tmpDirPath = this.tmpDirPath == null ? System.getProperty("java.io.tmpdir") : this.tmpDirPath;
+
+        if (tmpDirPath == null)
+            throw new IgniteSpiException("Error initializing temporary deployment directory.");
+
+        File dir = new File(tmpDirPath + File.separator + DEPLOY_TMP_ROOT_NAME + File.separator +
+                ignite.configuration().getNodeId());
+
+        if (!U.mkdirs(dir))
+            throw new IgniteSpiException("Error initializing temporary deployment directory: " + dir);
+
+        if (!dir.isDirectory())
+            throw new IgniteSpiException("Temporary deployment directory path is not a valid directory: " + dir);
+
+        if (!dir.canRead() || !dir.canWrite())
+            throw new IgniteSpiException("Can not write to or read from temporary deployment directory: " + dir);
+
+        this.tmpDirPath = tmpDirPath;
+
+        deployTmpDirPath = dir.getPath();
+        return deployTmpDirPath;
+    }
+
+    protected void releaseAllClassLoaders() {
+        List<ClassLoader> tmpClsLdrs;
+
+        synchronized (mux) {
+            tmpClsLdrs = new ArrayList<>(unitLoaders.size());
+
+            for (GridUriDeploymentUnitDescriptor desc : unitLoaders)
+                tmpClsLdrs.add(desc.getClassLoader());
+        }
+
+        for (ClassLoader ldr : tmpClsLdrs)
+            onUnitReleased(ldr);
+
+        unregisterMBean();
+    }
+
+    protected void deleteTempDirectory() {
+        if (deployTmpDirPath != null)
+            U.delete(new File(deployTmpDirPath));
+    }
+
+    protected String getStopInfo() {
+        return stopInfo();
+    }
+
+    protected String getStartInfo() {
+        return startInfo();
+    }
+
+    protected String getConfigInfo(String key, Object param) {
+        return configInfo(key, param);
+    }
+
+    protected String getConfigDirectory() {
+        return ignite.configuration().getWorkDirectory();
+    }
+
     /**
      * Task deployment descriptor comparator.
      * The greater descriptor is those one that has less timestamp.
@@ -1372,33 +1148,14 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
         return this;
     }
 
+    protected void registerBean(String igniteInstanceName, UriDeploymentSpiController.UriDeploymentSpiMBeanImpl impl,
+                                Class<UriDeploymentSpiMBean> mbeanItf) {
+        registerMBean(igniteInstanceName, impl, mbeanItf);
+    }
+
     /** {@inheritDoc} */
     @Override public String toString() {
         return S.toString(UriDeploymentSpi.class, this);
     }
 
-    /**
-     * MBean implementation for UriDeploymentSpi.
-     */
-    private class UriDeploymentSpiMBeanImpl extends IgniteSpiMBeanAdapter implements UriDeploymentSpiMBean {
-        /** {@inheritDoc} */
-        UriDeploymentSpiMBeanImpl(IgniteSpiAdapter spiAdapter) {
-            super(spiAdapter);
-        }
-
-        /** {@inheritDoc} */
-        @Override public String getTemporaryDirectoryPath() {
-            return UriDeploymentSpi.this.getTemporaryDirectoryPath();
-        }
-
-        /** {@inheritDoc} */
-        @Override public List<String> getUriList() {
-            return  UriDeploymentSpi.this.getUriList();
-        }
-
-        /** {@inheritDoc} */
-        @Override public boolean isCheckMd5() {
-            return  UriDeploymentSpi.this.isCheckMd5();
-        }
-    }
 }
