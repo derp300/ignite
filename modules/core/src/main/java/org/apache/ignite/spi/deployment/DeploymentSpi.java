@@ -58,7 +58,7 @@ import org.jetbrains.annotations.Nullable;
  * methods. Note again that calling methods from this interface on the obtained instance can lead
  * to undefined behavior and explicitly not supported.
  */
-public interface DeploymentSpi extends IgniteSpi {
+public interface DeploymentSpi {
     /**
      * Finds class loader for the given class.
      *

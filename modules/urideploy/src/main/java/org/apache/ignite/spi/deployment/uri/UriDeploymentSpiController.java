@@ -2,10 +2,11 @@ package org.apache.ignite.spi.deployment.uri;
 
 import org.apache.ignite.IgniteCheckedException;
 import org.apache.ignite.IgniteLogger;
-import org.apache.ignite.internal.IgniteInterruptedCheckedException;
+import org.apache.ignite.internal.util.typedef.internal.S;
 import org.apache.ignite.internal.util.typedef.internal.U;
 import org.apache.ignite.resources.LoggerResource;
 import org.apache.ignite.spi.IgniteSpiAdapter;
+import org.apache.ignite.spi.IgniteSpiConfiguration;
 import org.apache.ignite.spi.IgniteSpiException;
 import org.apache.ignite.spi.IgniteSpiMBeanAdapter;
 import org.apache.ignite.spi.deployment.uri.scanners.GridUriDeploymentScannerListener;
@@ -20,9 +21,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 
-import static org.apache.ignite.internal.util.IgniteUtils.assertParameter;
-
-public class UriDeploymentSpiController {
+public class UriDeploymentSpiController extends IgniteSpiAdapter {
     private static final String DFLT_DEPLOY_DIR = "deployment/file";
     private UriDeploymentSpi uriDeploymentSpi;
     @LoggerResource
@@ -38,27 +37,72 @@ public class UriDeploymentSpiController {
         this.uriDeploymentSpi = uriDeploymentSpi;
     }
 
+    public UUID getNodeId() {
+        return ignite.configuration().getNodeId();
+    }
+
+    /**
+     * Gets list of URIs that are processed by SPI.
+     *
+     * @return List of URIs.
+     */
     public List<String> getUriList() {
         return Collections.unmodifiableList(uriList);
     }
 
-    public void setUriList(List<String> uriList) {
+    /**
+     * Sets list of URI which point to GAR file and which should be
+     * scanned by SPI for the new tasks.
+     * <p>
+     * If not provided, default value is list with
+     * {@code file://${IGNITE_HOME}/work/deployment/file} element.
+     * Note that system property {@code IGNITE_HOME} must be set.
+     * For unknown {@code IGNITE_HOME} list of URI must be provided explicitly.
+     *
+     * @param uriList GAR file URIs.
+     * @return {@code this} for chaining.
+     */
+    @IgniteSpiConfiguration(optional = true)
+    public UriDeploymentSpiController setUriList(List<String> uriList) {
         this.uriList = uriList;
+
+        return this;
     }
 
     public void setEncodeUri(boolean encodeUri) {
         this.encodeUri = encodeUri;
     }
 
+    /**
+     * Gets scanners.
+     *
+     * @return Scanners.
+     */
     public UriDeploymentScanner[] getScanners() {
         return scanners;
     }
 
-    public void setScanners(UriDeploymentScanner... scanners) {
+    /**
+     * Sets scanners.
+     *
+     * @param scanners Scanners.
+     * @return {@code this} for chaining.
+     */
+    @IgniteSpiConfiguration(optional = true)
+    public UriDeploymentSpiController setScanners(UriDeploymentScanner... scanners) {
         this.scanners = scanners;
+
+        return this;
     }
 
-    public void spiStop() {
+    /** {@inheritDoc} */
+    public IgniteSpiAdapter setName(String name) {
+        super.setName(name);
+
+        return this;
+    }
+
+    @Override public void spiStop() {
         for (UriDeploymentScannerManager mgr : mgrs)
             mgr.cancel();
 
@@ -70,15 +114,18 @@ public class UriDeploymentSpiController {
         mgrs.clear();
 
         uriDeploymentSpi.releaseAllClassLoaders();
+        unregisterMBean();
         uriDeploymentSpi.deleteTempDirectory();
+        logSpiStopInfo();
     }
 
-    public void spiStart(String igniteInstanceName) throws IgniteSpiException {
+    @Override public void spiStart(String igniteInstanceName) throws IgniteSpiException {
+        startStopwatch();
         assertParameter(uriList != null, "uriList != null");
         initializeUriList();
         if (uriEncodedList.isEmpty())
             addDefaultUri();
-        uriDeploymentSpi.registerBean(igniteInstanceName, new UriDeploymentSpiMBeanImpl(uriDeploymentSpi), UriDeploymentSpiMBean.class);
+        registerMBean(igniteInstanceName, new UriDeploymentSpiMBeanImpl(this), UriDeploymentSpiMBean.class);
         configureScanners();
         initializeScannerManagers(igniteInstanceName);
         logSpiStartInfo();
@@ -136,20 +183,20 @@ public class UriDeploymentSpiController {
     private void logSpiStopInfo() {
         // Ack ok stop.
         if (log.isDebugEnabled())
-            log.debug(uriDeploymentSpi.getStopInfo());
+            log.debug(stopInfo());
     }
 
     private void logSpiStartInfo() {
         // Ack parameters.
         if (log.isDebugEnabled()) {
-            log.debug(uriDeploymentSpi.getConfigInfo("uriList", uriList));
-            log.debug(uriDeploymentSpi.getConfigInfo("encodeUri", encodeUri));
-            log.debug(uriDeploymentSpi.getConfigInfo("scanners", mgrs));
+            log.debug(configInfo("uriList", uriList));
+            log.debug(configInfo("encodeUri", encodeUri));
+            log.debug(configInfo("scanners", mgrs));
         }
 
         // Ack ok start.
         if (log.isDebugEnabled())
-            log.debug(uriDeploymentSpi.getStartInfo());
+            log.debug(startInfo());
     }
 
     private void initializeUriList() throws IgniteSpiException {
@@ -181,7 +228,7 @@ public class UriDeploymentSpiController {
         URI uri;
 
         try {
-            uri = U.resolveWorkDirectory(uriDeploymentSpi.getConfigDirectory(), DFLT_DEPLOY_DIR, false).toURI();
+            uri = U.resolveWorkDirectory(ignite.configuration().getWorkDirectory(), DFLT_DEPLOY_DIR, false).toURI();
         }
         catch (IgniteCheckedException e) {
             throw new IgniteSpiException("Failed to initialize default file scanner", e);
@@ -217,6 +264,11 @@ public class UriDeploymentSpiController {
         return cntr >= uriEncodedList.size();
     }
 
+    /** {@inheritDoc} */
+    @Override public String toString() {
+        return S.toString(UriDeploymentSpiController.class, this);
+    }
+
     /**
      * MBean implementation for UriDeploymentSpi.
      */
@@ -233,7 +285,7 @@ public class UriDeploymentSpiController {
 
         /** {@inheritDoc} */
         @Override public List<String> getUriList() {
-            return  uriDeploymentSpi.getUriList();
+            return  getUriList();
         }
 
         /** {@inheritDoc} */

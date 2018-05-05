@@ -45,7 +45,6 @@ import org.apache.ignite.internal.util.typedef.internal.S;
 import org.apache.ignite.internal.util.typedef.internal.U;
 import org.apache.ignite.lang.IgniteBiTuple;
 import org.apache.ignite.resources.LoggerResource;
-import org.apache.ignite.spi.IgniteSpiAdapter;
 import org.apache.ignite.spi.IgniteSpiConfiguration;
 import org.apache.ignite.spi.IgniteSpiConsistencyChecked;
 import org.apache.ignite.spi.IgniteSpiException;
@@ -55,8 +54,6 @@ import org.apache.ignite.spi.deployment.DeploymentResource;
 import org.apache.ignite.spi.deployment.DeploymentResourceAdapter;
 import org.apache.ignite.spi.deployment.DeploymentSpi;
 import org.apache.ignite.spi.deployment.uri.scanners.GridUriDeploymentScannerListener;
-import org.apache.ignite.spi.deployment.uri.scanners.UriDeploymentScanner;
-import org.apache.ignite.spi.deployment.uri.scanners.UriDeploymentScannerManager;
 import org.apache.ignite.spi.deployment.uri.scanners.file.UriDeploymentFileScanner;
 import org.apache.ignite.spi.deployment.uri.scanners.http.UriDeploymentHttpScanner;
 import org.jetbrains.annotations.Nullable;
@@ -163,12 +160,6 @@ import org.jetbrains.annotations.Nullable;
  * parameters (there are no mandatory parameters):
  * <ul>
  * <li>
- * Array of {@link UriDeploymentScanner}-s which will be used to deploy resources
- * (see {@link #setScanners(UriDeploymentScanner...)}). If not specified, preconfigured {@link UriDeploymentFileScanner}
- * and {@link UriDeploymentHttpScanner} are used. You can implement your own scanner
- * by implementing {@link UriDeploymentScanner} interface.
- * </li>
- * <li>
  * Temporary directory path where scanned GAR files and directories are
  * copied to (see {@link #setTemporaryDirectoryPath(String) setTemporaryDirectoryPath(String)}).
  * </li>
@@ -185,10 +176,6 @@ import org.jetbrains.annotations.Nullable;
  * <li><a href="#http">https://</a> - Secure HTTP protocol</li>
  * </ul>
  * <strong>Custom Protocols.</strong>
- * <p>
- * You can add support for additional protocols if needed. To do this implement UriDeploymentScanner interface and
- * plug your implementation into the SPI via {@link #setScanners(UriDeploymentScanner...)} method.
- * <p>
  * In addition to SPI configuration parameters, all necessary configuration
  * parameters for selected URI should be defined in URI. Different protocols
  * have different configuration parameters described below. Parameters are
@@ -300,7 +287,7 @@ import org.jetbrains.annotations.Nullable;
 @IgniteSpiMultipleInstancesSupport(true)
 @IgniteSpiConsistencyChecked(optional = false)
 @SuppressWarnings({"FieldAccessedSynchronizedAndUnsynchronized"})
-public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi {
+public class UriDeploymentSpi  implements DeploymentSpi {
     /**
      -     * Default temporary directory name relative to file path
      -     * {@link #setTemporaryDirectoryPath(String)}} (value is {@code gg.uri.deployment.tmp}).
@@ -362,24 +349,6 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
     }
 
     /**
-     * Sets list of URI which point to GAR file and which should be
-     * scanned by SPI for the new tasks.
-     * <p>
-     * If not provided, default value is list with
-     * {@code file://${IGNITE_HOME}/work/deployment/file} element.
-     * Note that system property {@code IGNITE_HOME} must be set.
-     * For unknown {@code IGNITE_HOME} list of URI must be provided explicitly.
-     *
-     * @param uriList GAR file URIs.
-     * @return {@code this} for chaining.
-     */
-    @IgniteSpiConfiguration(optional = true)
-    public UriDeploymentSpi setUriList(List<String> uriList) {
-        uriDeploymentSpiController.setUriList(uriList);
-        return this;
-    }
-
-    /**
      * If set to {@code true} then SPI should exclude files with same md5s from deployment.
      * Otherwise it should try to load new unit regardless to possible file duplication.
      *
@@ -428,50 +397,9 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
         return tmpDirPath;
     }
 
-    /**
-     * Gets list of URIs that are processed by SPI.
-     *
-     * @return List of URIs.
-     */
-    public List<String> getUriList() {
-        return uriDeploymentSpiController.getUriList();
-    }
-
     /** {@inheritDoc} */
     @Override public void setListener(@Nullable DeploymentListener lsnr) {
         this.lsnr = lsnr;
-    }
-
-    /**
-     * Gets scanners.
-     *
-     * @return Scanners.
-     */
-    public UriDeploymentScanner[] getScanners() {
-        return uriDeploymentSpiController.getScanners();
-    }
-
-    /**
-     * Sets scanners.
-     *
-     * @param scanners Scanners.
-     * @return {@code this} for chaining.
-     */
-    @IgniteSpiConfiguration(optional = true)
-    public UriDeploymentSpi setScanners(UriDeploymentScanner... scanners) {
-        uriDeploymentSpiController.setScanners(scanners);
-        return this;
-    }
-
-    /** {@inheritDoc} */
-    @Override public void spiStop() throws IgniteSpiException {
-        uriDeploymentSpiController.spiStop();
-    }
-
-    /** {@inheritDoc} */
-    @Override public void spiStart(String igniteInstanceName) throws IgniteSpiException {
-        startStopwatch();
-        uriDeploymentSpiController.spiStart(igniteInstanceName);
     }
 
     /** {@inheritDoc} */
@@ -1077,7 +1005,7 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
             throw new IgniteSpiException("Error initializing temporary deployment directory.");
 
         File dir = new File(tmpDirPath + File.separator + DEPLOY_TMP_ROOT_NAME + File.separator +
-                ignite.configuration().getNodeId());
+                uriDeploymentSpiController.getNodeId());
 
         if (!U.mkdirs(dir))
             throw new IgniteSpiException("Error initializing temporary deployment directory: " + dir);
@@ -1106,29 +1034,11 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
 
         for (ClassLoader ldr : tmpClsLdrs)
             onUnitReleased(ldr);
-
-        unregisterMBean();
     }
 
     protected void deleteTempDirectory() {
         if (deployTmpDirPath != null)
             U.delete(new File(deployTmpDirPath));
-    }
-
-    protected String getStopInfo() {
-        return stopInfo();
-    }
-
-    protected String getStartInfo() {
-        return startInfo();
-    }
-
-    protected String getConfigInfo(String key, Object param) {
-        return configInfo(key, param);
-    }
-
-    protected String getConfigDirectory() {
-        return ignite.configuration().getWorkDirectory();
     }
 
     /**
@@ -1147,18 +1057,6 @@ public class UriDeploymentSpi extends IgniteSpiAdapter implements DeploymentSpi 
 
             return o1.getTimestamp() == o2.getTimestamp() ? 0 : -1;
         }
-    }
-
-    /** {@inheritDoc} */
-    public IgniteSpiAdapter setName(String name) {
-        super.setName(name);
-
-        return this;
-    }
-
-    protected void registerBean(String igniteInstanceName, UriDeploymentSpiController.UriDeploymentSpiMBeanImpl impl,
-                                Class<UriDeploymentSpiMBean> mbeanItf) {
-        registerMBean(igniteInstanceName, impl, mbeanItf);
     }
 
     /** {@inheritDoc} */
